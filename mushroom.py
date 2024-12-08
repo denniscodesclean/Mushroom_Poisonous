@@ -19,7 +19,9 @@ from lightgbm import LGBMClassifier
 import xgboost as xgb
 from xgboost import XGBClassifier
 from sklearn.pipeline import Pipeline
-from sklearn.preprocessing import OneHotEncoder
+from sklearn.preprocessing import OneHotEncoder, StandardScaler
+from sklearn.impute import SimpleImputer
+from sklearn.compose import ColumnTransformer
 from sklearn.model_selection import RandomizedSearchCV, GridSearchCV
 from sklearn.metrics import classification_report, accuracy_score, confusion_matrix, roc_auc_score, precision_score, recall_score, matthews_corrcoef
 
@@ -131,6 +133,7 @@ params = {
     'learning_rate': 0.1,
     'eval_metric': 'auc',
     'tree_method': 'hist',  # necessary for categorical data
+    'random_state': 123
 }
 
 cv_results = xgb.cv(
@@ -141,8 +144,7 @@ cv_results = xgb.cv(
     stratified=True,
     early_stopping_rounds=10,
     as_pandas=True,
-    verbose_eval=True,
-    random_state=123
+    verbose_eval=False
 )
 
 print(cv_results)
@@ -161,18 +163,28 @@ best_model = xgb.train(
 y_pred = best_model.predict(dtrain)
 
 # Convert predictions to binary (0 or 1)
-y_pred_binary = (y_pred > 0.5).astype(int)
+y_pred_binary = (y_pred >= 0.5).astype(int)
 
 # Calculate precision and recall
 precision = precision_score(y_train, y_pred_binary)
 recall = recall_score(y_train, y_pred_binary)
 roc_auc = roc_auc_score(y_train,y_pred)
-mcc = matthews_corrcoef(y_train, y_pred)
+mcc = matthews_corrcoef(y_train, y_pred_binary)
 
 print(f'Precision: {precision}')
 print(f'Recall: {recall}')
 print(f'ROC AUC: {roc_auc}')
 print(f'Matthews Correlation Coefficient (MCC): {mcc}')
+
+"""# Baseline Model Performance
+Precision: 0.9902977124932426
+
+Recall: 0.9850163832916226
+
+ROC AUC: 0.9958233229456298
+
+Matthews Correlation Coefficient (MCC): 0.9728336850663745
+"""
 
 # Feature importance
 importance = best_model.get_score(importance_type='weight')
@@ -195,5 +207,91 @@ Scenario 3:
 - Feature is Not Missing
 - Action: Keep
 
+"""
+
+# Drop unimportant features from X_train
+to_remove = ['veil-type', 'spore-print-color', 'veil-color']
+X_train.drop(to_remove, axis=1,inplace=True)
+
+# Drop unimportant features from cat_clos
+cat_cols = [col for col in cat_cols if col not in to_remove]
+
+# Pipline Starts
+# Define the preprocessing steps
+preprocessor = ColumnTransformer(
+    transformers=[
+        ('num', StandardScaler(), X_train.select_dtypes('number').columns),  # For numerical features
+        ('cat', Pipeline([
+            ('imputer', SimpleImputer(strategy='most_frequent')),  # Impute missing categorical values
+            ('encoder', OneHotEncoder(handle_unknown='ignore'))  # Encode categorical variables
+        ]), cat_cols)
+    ]
+)
+
+# Define the model
+model = XGBClassifier(objective='binary:logistic', eval_metric='auc')
+
+# Create the pipeline
+pipeline = Pipeline(steps=[
+    ('preprocessor', preprocessor),
+    ('model', model)
+])
+
+# Hyperparameter Tuning
+# Define the hyperparameter grid
+param_dist = {
+    'model__max_depth': range(2,7),
+    'model__learning_rate': np.arange(0.01, 0.41, 0.05),
+    'model__n_estimators': np.arange(100,500,50),
+    'model__subsample': np.arange(0.3, 0.9, 0.2),
+    'model__gamma': [0, 0.1, 0.5],
+    'model__reg_alpha': [0,0.1, 1],
+    'model__reg_lambda': [0,1,5,10],
+}
+
+# Perform Grid Search
+random_search = RandomizedSearchCV(pipeline,
+                                   n_iter=20,
+                                   param_distributions=param_dist,
+                                   cv=5,
+                                   return_train_score=True,
+                                   verbose=1,
+                                   random_state=123)
+random_search.fit(X_train, y_train)
+
+# Print best hyperparameters
+print(f"Best hyperparameters: {random_search.best_params_}")
+result = pd.DataFrame(random_search.cv_results_)
+result[['param_model__subsample',
+        'param_model__reg_lambda',
+        'param_model__reg_alpha',
+        'param_model__n_estimators',
+        'param_model__max_depth',
+        'param_model__learning_rate',
+        'param_model__gamma',
+        'mean_test_score',
+        'mean_train_score',
+        'rank_test_score']].sort_values(by='rank_test_score',ascending=True)
+
+y_pred = random_search.best_estimator_.predict(X_train)
+y_pred_binary = (y_pred >= 0.5).astype(int)
+
+precision = precision_score(y_train, y_pred_binary)
+print(f'Precision: {precision:.4f}')
+recall = recall_score(y_train, y_pred_binary)
+print(f'Recall: {recall:.4f}')
+roc_auc = roc_auc_score(y_train, y_pred)
+print(f'ROC_AUC: {roc_auc:.4f}')
+mcc = matthews_corrcoef(y_train, y_pred_binary)
+print(f'MCC: {mcc:.4f}')
+
+"""# Tuned XGB Model Performance
+Precision: 0.9934
+
+Recall: 0.9912
+
+ROC_AUC: 0.9916
+
+MCC: 0.9830
 """
 
